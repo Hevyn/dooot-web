@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>라이브 피팅</title>
+<!--
+  dooot 라이브 피팅 (AnyWear 위젯).
+  진짜 https(GitHub Pages)에 index.html로 올려서 앱 → 외부 Safari로 열어야 카메라가 켜진다.
+
+  옷 이미지는 쿼리로 전달:  fitting.html?garment=<이미지URL>
+  (코디는 앱에서 콜라주/아바타 "합성 사진 1장"을 garment로 넘긴다 → 단품처럼 동작)
+
+  ⚠️ 위젯이 사진 위에 붙이는 작은 pill 버튼은 세로로 긴 이미지에선 화면 밖으로 밀려
+     안 보일 때가 있다. 그래서 pill은 숨기고, 맨 위 큰 버튼에서
+     window.DecartWidget.open()을 직접 호출한다. (open()은 위젯 로드 후 생김)
+-->
+<style>
+  html,body{margin:0;padding:0;min-height:100%;background:#000;
+    font-family:-apple-system,BlinkMacSystemFont,sans-serif;}
+  .wrap{display:flex;flex-direction:column;align-items:center;
+    gap:16px;padding:20px;box-sizing:border-box;color:#fff;text-align:center;}
+  /* 맨 위 큰 Try-On 버튼 (스크롤해도 상단 고정) */
+  #tryBtn{position:sticky;top:12px;z-index:10;
+    width:100%;max-width:440px;border:0;border-radius:16px;
+    padding:18px 20px;font-size:18px;font-weight:700;
+    color:#fff;background:#4f46e5;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;gap:8px;
+    box-shadow:0 8px 24px rgba(0,0,0,.45);transition:opacity .2s;}
+  #tryBtn:disabled{opacity:.5;cursor:default;}
+  .wrap img{max-width:85%;max-height:60vh;object-fit:contain;border-radius:16px;}
+  .hint{font-size:14px;opacity:.6;line-height:1.5;}
+  .err{font-size:14px;opacity:.6;}
+  /* 위젯 자체 pill 버튼은 숨김 — 우리 상단 버튼만 쓴다 */
+  #__decart-pill-btn{display:none !important;}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <button id="tryBtn" disabled>준비 중…</button>
+    <img id="garment" alt="옷" />
+    <div class="hint">위 버튼을 눌러 실시간으로 입어보세요 🪞</div>
+  </div>
+
+  <script>
+  (function () {
+    var params  = new URLSearchParams(location.search);
+    var garment = params.get('garment');
+    var wrap    = document.querySelector('.wrap');
+
+    if (!garment) {
+      wrap.innerHTML = '<div class="err">옷 이미지가 없어요. (garment 파라미터 필요)</div>';
+      return;
+    }
+
+    document.getElementById('garment').src = garment;
+
+    // og:image
+    var og = document.createElement('meta');
+    og.setAttribute('property', 'og:image');
+    og.content = garment;
+    document.head.appendChild(og);
+
+    // 위젯이 "상품 페이지"로 인식하도록 JSON-LD(@type:Product) 주입 (위젯 로드 전에).
+    var ld = document.createElement('script');
+    ld.type = 'application/ld+json';
+    ld.textContent = JSON.stringify({
+      "@context": "https://schema.org",
+      "@type": "Product",
+      "name": "내 옷",
+      "image": garment,
+      "description": "dooot live fitting",
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "KRW",
+                  "availability": "https://schema.org/InStock" }
+    });
+    document.head.appendChild(ld);
+
+    // AnyWear 위젯 로드.
+    var s = document.createElement('script');
+    s.src = 'https://anywear.decart.ai/widget/latest/anywear.js?domain=' + location.hostname;
+    s.async = true;
+    document.body.appendChild(s);
+
+    // 상단 큰 버튼 → 위젯의 Try-On 직접 실행.
+    var btn = document.getElementById('tryBtn');
+    btn.addEventListener('click', function () {
+      if (window.DecartWidget && typeof window.DecartWidget.open === 'function') {
+        window.DecartWidget.open();
+      }
+    });
+
+    // 위젯(open 함수)이 준비되면 버튼 활성화. 오래 걸리면 새로고침으로 폴백.
+    var tries = 0;
+    var timer = setInterval(function () {
+      tries++;
+      if (window.DecartWidget && typeof window.DecartWidget.open === 'function') {
+        clearInterval(timer);
+        btn.disabled = false;
+        btn.textContent = '🪞 입어보기';
+      } else if (tries > 40) { // 약 20초
+        clearInterval(timer);
+        btn.disabled = false;
+        btn.textContent = '다시 불러오기';
+        btn.onclick = function () { location.reload(); };
+      }
+    }, 500);
+  })();
+  </script>
+</body>
+</html>
