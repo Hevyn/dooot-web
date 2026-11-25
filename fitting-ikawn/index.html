@@ -6,6 +6,8 @@
 <meta name="robots" content="noindex">
 <meta name="referrer" content="no-referrer">
 <title>dooot 직접 입어보기</title>
+<link rel="preconnect" href="https://api.ikawn.com" crossorigin>
+<link rel="modulepreload" href="https://api.ikawn.com/sdk/mirror.js" crossorigin>
 <!--
   dooot 직접 입어보기 — iKawn Mirror용 페이지 (2026-11-25).
   앱이 Safari로 연다:  …/fitting-ikawn/?garment=<옷 이미지 주소>&kind=<옷 종류>#s=<세션>
@@ -103,7 +105,9 @@ const garmentURL = params.get("garment");
 const kind = params.get("kind") || "";
 const prompt = Object.hasOwn(PROMPTS, kind) ? PROMPTS[kind] : undefined;
 const debugOn = params.get("debug") === "1";
-let lastStage = "";
+let lastStage = "", refInfo = "", timeline = "";
+const t0 = performance.now();
+const mark = (name) => { timeline += "\n" + ((performance.now() - t0) / 1000).toFixed(1) + "s " + name; };
 const session = readSession();
 // 세션 값이 주소창 · 방문 기록에 남지 않게 바로 지운다.
 try { history.replaceState(null, "", location.pathname + location.search); } catch {}
@@ -137,7 +141,8 @@ function showDebug() {
     "\ncam  " + (s.width || "?") + "x" + (s.height || "?") + " video " + cam.videoWidth + "x" + cam.videoHeight +
     "\nsend " + pre.width + "x" + pre.height +
     "\nout  " + out.videoWidth + "x" + out.videoHeight +
-    "\nstage " + lastStage;
+    "\nref  " + refInfo +
+    timeline;
 }
 if (debugOn) setInterval(showDebug, 500);
 
@@ -155,14 +160,15 @@ function readSession() {
 function showWait(text) { waitText.textContent = text; wait.style.display = "flex"; }
 function hideWait() { wait.style.display = "none"; }
 
-/** 옷 사진을 받아 긴 변 1024 안쪽의 JPEG로 줄인다(흰 바탕). 올리는 시간이 짧아진다. */
+const REFERENCE_EDGE = 1024;   // 보내는 옷 사진의 긴 변(작을수록 빨리 올라간다)
+/** 옷 사진을 받아 긴 변 REFERENCE_EDGE 안쪽의 JPEG로 줄인다(흰 바탕). 올리는 시간이 짧아진다. */
 async function loadReference(url) {
   const res = await fetch(url, { mode: "cors", cache: "force-cache" });
   if (!res.ok) throw new Error("garment " + res.status);
   const blob = await res.blob();
   try {
     const bmp = await createImageBitmap(blob);
-    const scale = Math.min(1, 1024 / Math.max(bmp.width, bmp.height));
+    const scale = Math.min(1, REFERENCE_EDGE / Math.max(bmp.width, bmp.height));
     const canvas = document.createElement("canvas");
     canvas.width = Math.round(bmp.width * scale);
     canvas.height = Math.round(bmp.height * scale);
@@ -170,8 +176,8 @@ async function loadReference(url) {
     ctx.fillStyle = "#fff";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
-    const jpeg = await new Promise((ok) => canvas.toBlob(ok, "image/jpeg", 0.9));
-    if (jpeg) return jpeg;
+    const jpeg = await new Promise((ok) => canvas.toBlob(ok, "image/jpeg", 0.85));
+    if (jpeg) { refInfo = canvas.width + "x" + canvas.height + " " + Math.round(jpeg.size / 1024) + "KB"; return jpeg; }
   } catch (e) { console.warn("resize failed", e); }
   if (!blob.type.startsWith("image/") || blob.size > 10 * 1024 * 1024) throw new Error("garment type");
   return blob;
@@ -226,6 +232,9 @@ const STAGE_TEXT = {
 };
 
 async function start() {
+  // 옷 사진과 SDK는 지금 바로 받기 시작한다 — 카메라 허용을 기다리는 동안 끝나 있게.
+  const preload = Promise.all([loadReference(garmentURL), import(SDK_URL)]);
+  preload.catch(() => {});
   // 1) 카메라 — 연결되는 동안 내 모습을 먼저 보여 준다.
   showWait("카메라를 켜는 중…");
   try {
@@ -242,6 +251,7 @@ async function start() {
   if (!cam.videoWidth) await new Promise((ok) => { cam.addEventListener("loadeddata", ok, { once: true }); setTimeout(ok, 2000); });
   if (ended) return;
   sending = startSending();
+  mark("camera on");
   pre.classList.add("on");
   garmentBox.classList.add("mini");
   btn.hidden = false;
@@ -255,7 +265,8 @@ async function start() {
   // 2) 옷 사진 + SDK
   let reference, sdk;
   try {
-    [reference, sdk] = await Promise.all([loadReference(garmentURL), import(SDK_URL)]);
+    [reference, sdk] = await preload;
+    mark("ref+sdk ready");
   } catch (e) {
     console.error(e);
     return finish("옷 사진을 불러오지 못했어요. 앱으로 돌아가 다시 눌러 주세요.");
@@ -265,7 +276,7 @@ async function start() {
   // 3) 연결
   const mirror = sdk.createMirrorClient({
     sessionProvider: async () => session,   // 앱이 넘겨준 세션을 그대로 쓴다
-    onStage: (e) => { lastStage = e.stage; if (!ended && STAGE_TEXT[e.stage] && !out.classList.contains("on")) showWait(STAGE_TEXT[e.stage]); },
+    onStage: (e) => { lastStage = e.stage; mark(e.stage); if (!ended && STAGE_TEXT[e.stage] && !out.classList.contains("on")) showWait(STAGE_TEXT[e.stage]); },
     onError: (e) => { console.error(e); finish("연결이 끊겼어요. 앱으로 돌아가 다시 눌러 주세요."); },
     onUsage: (u) => { if (u && ["ended", "failed"].includes(u.status)) finish("다 입어 봤어요. 앱으로 돌아가 다른 옷도 입어 보세요."); },
   });
@@ -291,6 +302,7 @@ async function start() {
 // 입은 모습의 첫 장면이 나오면 그때부터 시간을 센다.
 out.addEventListener("playing", () => {
   if (ended || countdown) return;
+  mark("FIRST FRAME");
   clearTimeout(startupTimer);
   hideWait();
   out.classList.add("on");
