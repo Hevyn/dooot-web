@@ -8,7 +8,8 @@
 <title>dooot 직접 입어보기</title>
 <!--
   dooot 직접 입어보기 — iKawn Mirror용 페이지 (2026-11-25).
-  앱이 Safari로 연다:  …/fitting-ikawn/?garment=<옷 이미지 주소>#s=<세션>
+  앱이 Safari로 연다:  …/fitting-ikawn/?garment=<옷 이미지 주소>&kind=<옷 종류>#s=<세션>
+  (kind: top · bottom · outer · onepiece · hat · shoes · bag · accessory · outfit. debug=1 이면 왼쪽 아래에 크기 정보가 보인다.)
 
   - 이 페이지에는 키가 없다. iKawn 키는 Supabase 서버 함수(live-session)에만 있고,
     앱이 그 함수에서 "이번 한 번"에만 쓸 수 있는 세션을 받아 주소 끝(#s=)에 붙여 넘긴다.
@@ -23,9 +24,13 @@
   .wrap { height:100dvh; display:flex; flex-direction:column; gap:14px;
     padding:calc(12px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom)); }
   .stage { position:relative; flex:1; min-height:0; border-radius:24px; background:var(--bg); overflow:hidden; }
-  .stage video { position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
-    transform:scaleX(-1); opacity:0; transition:opacity .35s; background:#000; }
-  .stage video.on { opacity:1; }
+  .stage .view { position:absolute; inset:0; width:100%; height:100%; object-fit:cover;
+    opacity:0; transition:opacity .35s; background:#000; }
+  .stage .view.on { opacity:1; }
+  /* 카메라 원본 — 화면에는 안 보이지만 재생되고 있어야 캔버스에 그릴 수 있다. */
+  #cam { position:absolute; width:2px; height:2px; opacity:0; pointer-events:none; }
+  .debug { position:absolute; left:8px; top:112px; z-index:3; padding:6px 8px; border-radius:8px;
+    background:rgba(0,0,0,.6); color:#9f9; font:11px/1.4 ui-monospace,Menlo,monospace; white-space:pre; display:none; }
   /* 옷 사진 — 카메라가 켜지기 전에는 가운데 크게, 켜지면 왼쪽 위 작은 카드로. */
   .garment { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
     transition:all .35s; pointer-events:none; }
@@ -53,7 +58,9 @@
 <div class="wrap">
   <div class="stage">
     <video id="cam" playsinline muted autoplay></video>
-    <video id="out" playsinline muted autoplay></video>
+    <canvas id="pre" class="view"></canvas>
+    <video id="out" class="view" playsinline muted autoplay></video>
+    <div class="debug" id="debug"></div>
     <div class="garment" id="garmentBox"><img id="garment" alt="입어 볼 옷"></div>
     <div class="badge" id="badge"></div>
     <div class="wait" id="wait"><span><i class="spin"></i><b id="waitText">연결하는 중…</b></span></div>
@@ -67,19 +74,72 @@
 const SESSION_SECONDS = 20;      // 한 번에 입어 보는 시간(화면에 입은 모습이 나온 뒤부터 센다)
 const STARTUP_LIMIT_SECONDS = 40; // 이 시간 안에 입은 모습이 안 나오면 끊는다
 const SDK_URL = "https://api.ikawn.com/sdk/mirror.js";
+// iKawn에 보내는 화면 크기. 아이폰 Safari는 세로 화면을 "돌려서 보라"는 표시와 함께 보내는데
+// 받는 쪽이 그 표시를 무시하면 사람이 옆으로 누워 보인다. 그래서 카메라를 캔버스에 똑바로 그려서 그 화면을 보낸다.
+const SEND_WIDTH = 480, SEND_HEIGHT = 640, SEND_FPS = 24;
+
+// 옷 종류별 지시문(앱이 ?kind= 로 알려 준다). 여기 없는 값이면 iKawn의 기본 지시문(옷만 바꾸기)을 쓴다.
+// 쓰는 법은 https://api.ikawn.com/prompt-guide.html — 바꿀 것을 콕 집고, 그대로 둘 것을 적는다.
+const KEEP = " Preserve the person's face, hair, skin, body, pose, lighting and background. Keep the result photorealistic.";
+const PROMPTS = {
+  top: "Replace only the person's top with the top in the reference image. Match its color, neckline, sleeves and pattern. Do not change the trousers or skirt." + KEEP,
+  bottom: "Replace only the person's bottoms (trousers, shorts or skirt) with the bottoms in the reference image. Match the color, length and pattern. Do not change the top." + KEEP,
+  outer: "Put the jacket or coat from the reference image on the person as outerwear over the upper body. Match its color, collar, length and pattern. Do not change the trousers or skirt." + KEEP,
+  onepiece: "Replace the person's outfit with the dress from the reference image. Match its color, neckline, length and pattern." + KEEP,
+  hat: "Put the hat from the reference image on the person's head. Match its shape, color and details. Do not change the person's clothing." + KEEP,
+  shoes: "Replace only the person's shoes with the shoes in the reference image. Match their shape and color. Do not change the person's clothing." + KEEP,
+  bag: "Add the bag from the reference image to the person, carried naturally on the shoulder or in the hand. Do not change the person's clothing." + KEEP,
+  accessory: "Add the accessory from the reference image to the person, worn where it naturally belongs. Do not change the person's clothing." + KEEP,
+  outfit: "Replace the person's entire outfit with the outfit shown in the reference image. Match each garment's color, shape and pattern." + KEEP,
+};
 // ────────────────────────────────────────────────────────────────
 
 const $ = (id) => document.getElementById(id);
 const msg = $("msg"), btn = $("btn"), badge = $("badge"), wait = $("wait"), waitText = $("waitText");
-const cam = $("cam"), out = $("out"), garmentBox = $("garmentBox");
+const cam = $("cam"), out = $("out"), pre = $("pre"), garmentBox = $("garmentBox"), debugEl = $("debug");
 
 const params = new URLSearchParams(location.search);
 const garmentURL = params.get("garment");
+const kind = params.get("kind") || "";
+const prompt = Object.hasOwn(PROMPTS, kind) ? PROMPTS[kind] : undefined;
+const debugOn = params.get("debug") === "1";
+let lastStage = "";
 const session = readSession();
 // 세션 값이 주소창 · 방문 기록에 남지 않게 바로 지운다.
 try { history.replaceState(null, "", location.pathname + location.search); } catch {}
 
-let camera = null, live = null, ended = false, countdown = null, startupTimer = null;
+let camera = null, sending = null, drawTimer = null, live = null, ended = false, countdown = null, startupTimer = null;
+
+/** 카메라를 캔버스에 똑바로(거울처럼 좌우를 뒤집어) 그리고, 그 캔버스를 보낼 화면으로 만든다. */
+function startSending() {
+  pre.width = SEND_WIDTH; pre.height = SEND_HEIGHT;
+  const ctx = pre.getContext("2d", { alpha: false });
+  const draw = () => {
+    const vw = cam.videoWidth, vh = cam.videoHeight;
+    if (!vw || !vh) return;
+    // 화면을 꽉 채우게 가운데를 잘라 그린다.
+    const scale = Math.max(SEND_WIDTH / vw, SEND_HEIGHT / vh);
+    const w = vw * scale, h = vh * scale;
+    ctx.setTransform(-1, 0, 0, 1, SEND_WIDTH, 0);   // 좌우 뒤집기 — 거울처럼 보이고, 옷의 글씨는 바로 보인다
+    ctx.drawImage(cam, (SEND_WIDTH - w) / 2, (SEND_HEIGHT - h) / 2, w, h);
+  };
+  draw();
+  drawTimer = setInterval(draw, 1000 / SEND_FPS);
+  return pre.captureStream(SEND_FPS);
+}
+
+function showDebug() {
+  if (!debugOn) return;
+  const s = camera && camera.getVideoTracks()[0] ? camera.getVideoTracks()[0].getSettings() : {};
+  debugEl.style.display = "block";
+  debugEl.textContent =
+    "kind " + (kind || "-") + (prompt ? " (prompt)" : " (default)") +
+    "\ncam  " + (s.width || "?") + "x" + (s.height || "?") + " video " + cam.videoWidth + "x" + cam.videoHeight +
+    "\nsend " + pre.width + "x" + pre.height +
+    "\nout  " + out.videoWidth + "x" + out.videoHeight +
+    "\nstage " + lastStage;
+}
+if (debugOn) setInterval(showDebug, 500);
 
 function readSession() {
   try {
@@ -136,10 +196,12 @@ async function finish(text) {
   badge.style.display = "none"; hideWait();
   btn.hidden = true;
   msg.textContent = text;
-  out.classList.remove("on"); cam.classList.remove("on");
+  clearInterval(drawTimer);
+  out.classList.remove("on"); pre.classList.remove("on");
   garmentBox.classList.remove("mini");
   endOnServer();
   try { if (live) await live.disconnect(); } catch {}
+  if (sending) sending.getTracks().forEach((t) => t.stop());
   if (camera) camera.getTracks().forEach((t) => t.stop());
   cam.srcObject = null; out.srcObject = null;
 }
@@ -176,8 +238,11 @@ async function start() {
   }
   if (ended) { camera.getTracks().forEach((t) => t.stop()); return; }
   cam.srcObject = camera;
-  cam.play().catch(() => {});
-  cam.classList.add("on");
+  try { await cam.play(); } catch {}
+  if (!cam.videoWidth) await new Promise((ok) => { cam.addEventListener("loadeddata", ok, { once: true }); setTimeout(ok, 2000); });
+  if (ended) return;
+  sending = startSending();
+  pre.classList.add("on");
   garmentBox.classList.add("mini");
   btn.hidden = false;
   msg.textContent = "조금만 기다려 주세요. 곧 옷을 입혀 드려요.";
@@ -200,14 +265,15 @@ async function start() {
   // 3) 연결
   const mirror = sdk.createMirrorClient({
     sessionProvider: async () => session,   // 앱이 넘겨준 세션을 그대로 쓴다
-    onStage: (e) => { if (!ended && STAGE_TEXT[e.stage] && !out.classList.contains("on")) showWait(STAGE_TEXT[e.stage]); },
+    onStage: (e) => { lastStage = e.stage; if (!ended && STAGE_TEXT[e.stage] && !out.classList.contains("on")) showWait(STAGE_TEXT[e.stage]); },
     onError: (e) => { console.error(e); finish("연결이 끊겼어요. 앱으로 돌아가 다시 눌러 주세요."); },
     onUsage: (u) => { if (u && ["ended", "failed"].includes(u.status)) finish("다 입어 봤어요. 앱으로 돌아가 다른 옷도 입어 보세요."); },
   });
   try {
-    const connected = await mirror.connect(camera, {
+    const connected = await mirror.connect(sending, {
       capability: "tryon",
       referenceImage: reference,
+      prompt,   // 없으면(undefined) iKawn의 기본 지시문
       onRemoteStream: (stream) => {
         if (ended) return;
         out.srcObject = stream;
