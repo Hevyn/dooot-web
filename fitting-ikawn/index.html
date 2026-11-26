@@ -312,8 +312,10 @@ out.addEventListener("playing", () => {
 
 btn.addEventListener("click", () => finish("앱으로 돌아가 다른 옷도 입어 보세요."));
 // 화면을 벗어나면 바로 끊는다 — 보지 않는 동안 시간이 흐르지 않게.
+// 카메라가 켜지기 전(허용을 기다리는 중)이어도 끊는다 — 안 끊으면 세션이 열린 채 남아
+// 다음에 누를 때 iKawn이 "429 concurrency limit"으로 막는다.
 document.addEventListener("visibilitychange", () => {
-  if (document.hidden && !ended && camera) finish("앱으로 돌아가 다시 눌러 주세요.");
+  if (document.hidden && !ended && session) finish("앱으로 돌아가 다시 눌러 주세요.");
 });
 window.addEventListener("pagehide", endOnServer);
 
